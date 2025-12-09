@@ -5,11 +5,15 @@ pipeline {
         // Docker configuration
         DOCKER_IMAGE = 'n8n-web-app'
         DOCKER_TAG = "${env.BUILD_NUMBER}"
-        DOCKER_REGISTRY = 'docker.io' // Change to your registry
-        DOCKER_CREDENTIALS_ID = 'docker-hub-credentials' // Jenkins credential ID
 
         // Application configuration
         APP_NAME = 'n8n-web-app'
+
+        // Deployment server configuration
+        DEPLOY_ADDRESS = credentials('DEV_SERVER')
+        DEPLOY_SERVER = "root@${DEPLOY_ADDRESS}"
+        DEPLOY_PATH = 'n8n-web-app' // Path on deployment server
+        DEPLOY_SSH_CREDENTIALS_ID = credentials('ssh-credentials-comulead-test-id') // Jenkins SSH credential ID
 
         // Deployment configuration
         DEPLOY_ENV = "${env.BRANCH_NAME == 'master' ? 'production' : 'staging'}"
@@ -126,17 +130,78 @@ pipeline {
             }
         }
 
-        stage('Push to Registry') {
+        stage('Save Docker Image') {
             when {
                 branch 'master'
             }
             steps {
-                echo 'Pushing image to registry...'
-                script {
-                    docker.withRegistry("https://${DOCKER_REGISTRY}", "${DOCKER_CREDENTIALS_ID}") {
-                        docker.image("${DOCKER_IMAGE}:${DOCKER_TAG}").push()
-                        docker.image("${DOCKER_IMAGE}:latest").push()
-                    }
+                echo 'Saving Docker image to tar file...'
+                sh '''
+                    # Save Docker image to tar file
+                    docker save ${DOCKER_IMAGE}:${DOCKER_TAG} -o ${DOCKER_IMAGE}-${DOCKER_TAG}.tar
+                    docker save ${DOCKER_IMAGE}:latest -o ${DOCKER_IMAGE}-latest.tar
+
+                    # Compress the image
+                    gzip -f ${DOCKER_IMAGE}-${DOCKER_TAG}.tar
+                    gzip -f ${DOCKER_IMAGE}-latest.tar
+
+                    echo "Docker image saved to ${DOCKER_IMAGE}-${DOCKER_TAG}.tar.gz"
+                '''
+            }
+        }
+
+        stage('Transfer to Deployment Server') {
+            when {
+                branch 'master'
+            }
+            steps {
+                echo 'Transferring files to deployment server...'
+                sshagent(credentials: ["${DEPLOY_SSH_CREDENTIALS_ID}"]) {
+                    sh '''
+                        # Create deployment directory on server
+                        ssh -o StrictHostKeyChecking=no ${DEPLOY_SERVER} "mkdir -p ${DEPLOY_PATH}"
+
+                        # Transfer Docker image
+                        scp -o StrictHostKeyChecking=no ${DOCKER_IMAGE}-${DOCKER_TAG}.tar.gz ${DEPLOY_SERVER}:${DEPLOY_PATH}/
+                        scp -o StrictHostKeyChecking=no ${DOCKER_IMAGE}-latest.tar.gz ${DEPLOY_SERVER}:${DEPLOY_PATH}/
+
+                        # Transfer application files
+                        scp -o StrictHostKeyChecking=no -r htdocs/ ${DEPLOY_SERVER}:${DEPLOY_PATH}/
+                        scp -o StrictHostKeyChecking=no docker-compose.yml ${DEPLOY_SERVER}:${DEPLOY_PATH}/
+                        scp -o StrictHostKeyChecking=no .env.example ${DEPLOY_SERVER}:${DEPLOY_PATH}/
+                        scp -o StrictHostKeyChecking=no if0_40626529_n8n.sql ${DEPLOY_SERVER}:${DEPLOY_PATH}/ || true
+
+                        echo "Files transferred successfully"
+                    '''
+                }
+            }
+        }
+
+        stage('Load Docker Image on Server') {
+            when {
+                branch 'master'
+            }
+            steps {
+                echo 'Loading Docker image on deployment server...'
+                sshagent(credentials: ["${DEPLOY_SSH_CREDENTIALS_ID}"]) {
+                    sh '''
+                        ssh -o StrictHostKeyChecking=no ${DEPLOY_SERVER} << 'ENDSSH'
+                            cd ${DEPLOY_PATH}
+
+                            # Decompress and load Docker image
+                            gunzip -f ${DOCKER_IMAGE}-${DOCKER_TAG}.tar.gz
+                            gunzip -f ${DOCKER_IMAGE}-latest.tar.gz
+
+                            docker load -i ${DOCKER_IMAGE}-${DOCKER_TAG}.tar
+                            docker load -i ${DOCKER_IMAGE}-latest.tar
+
+                            # Clean up tar files
+                            rm -f ${DOCKER_IMAGE}-${DOCKER_TAG}.tar
+                            rm -f ${DOCKER_IMAGE}-latest.tar
+
+                            echo "Docker image loaded successfully"
+ENDSSH
+                    '''
                 }
             }
         }
@@ -158,7 +223,7 @@ pipeline {
                     sleep 10
 
                     # Verify deployment
-                    curl -f http://localhost:8080 || { echo "Staging deployment failed"; exit 1; }
+                    curl -f http://localhost:8282 || { echo "Staging deployment failed"; exit 1; }
                 '''
             }
         }
@@ -171,27 +236,53 @@ pipeline {
                 echo 'Deploying to production environment...'
                 input message: 'Deploy to production?', ok: 'Deploy'
 
-                sh '''
-                    # Backup current deployment
-                    echo "Creating backup..."
+                sshagent(credentials: ["${DEPLOY_SSH_CREDENTIALS_ID}"]) {
+                    sh '''
+                        ssh -o StrictHostKeyChecking=no ${DEPLOY_SERVER} << 'ENDSSH'
+                            cd ${DEPLOY_PATH}
 
-                    # Deploy new version with zero downtime
-                    docker-compose -f docker-compose.yml pull
-                    docker-compose -f docker-compose.yml up -d --no-deps --build web
+                            # Create .env if it doesn't exist
+                            if [ ! -f .env ]; then
+                                echo "Creating .env from .env.example"
+                                cp .env.example .env
+                                echo "IMPORTANT: Please configure .env with production values"
+                            fi
 
-                    # Wait for new container to be healthy
-                    sleep 15
+                            # Backup current deployment
+                            echo "Creating backup..."
+                            if [ -d "backup" ]; then
+                                rm -rf backup_old
+                                mv backup backup_old
+                            fi
+                            mkdir -p backup
+                            docker-compose ps -q | xargs -r docker inspect > backup/containers.json || true
 
-                    # Verify deployment
-                    curl -f http://localhost:8080 || {
-                        echo "Production deployment failed, rolling back..."
-                        docker-compose -f docker-compose.yml down
-                        exit 1
-                    }
+                            # Stop old containers
+                            docker-compose down || true
 
-                    # Cleanup old images
-                    docker image prune -f
-                '''
+                            # Deploy new version
+                            docker-compose up -d
+
+                            # Wait for services to be healthy
+                            sleep 15
+
+                            # Verify deployment
+                            DEPLOY_PORT=\$(grep WEB_PORT .env | cut -d '=' -f2)
+                            DEPLOY_PORT=\${DEPLOY_PORT:-8282}
+
+                            curl -f http://localhost:\${DEPLOY_PORT} || {
+                                echo "Production deployment failed, rolling back..."
+                                docker-compose down
+                                exit 1
+                            }
+
+                            # Cleanup old images
+                            docker image prune -f
+
+                            echo "Deployment successful!"
+ENDSSH
+                    '''
+                }
             }
         }
 
@@ -200,50 +291,82 @@ pipeline {
                 branch 'master'
             }
             steps {
-                echo 'Running database migrations...'
-                sh '''
-                    # Check if migrations are needed
-                    if [ -f "migrations.sql" ]; then
-                        echo "Running migrations..."
-                        docker-compose exec -T db mysql -u root -p${MYSQL_ROOT_PASSWORD} ${DB_NAME} < migrations.sql
-                    else
-                        echo "No migrations to run"
-                    fi
-                '''
+                echo 'Running database migrations on deployment server...'
+                sshagent(credentials: ["${DEPLOY_SSH_CREDENTIALS_ID}"]) {
+                    sh '''
+                        ssh -o StrictHostKeyChecking=no ${DEPLOY_SERVER} << 'ENDSSH'
+                            cd ${DEPLOY_PATH}
+
+                            # Check if migrations are needed
+                            if [ -f "migrations.sql" ]; then
+                                echo "Running migrations..."
+                                docker-compose exec -T db mysql -u root -p\${MYSQL_ROOT_PASSWORD} \${DB_NAME} < migrations.sql
+                            else
+                                echo "No migrations to run"
+                            fi
+ENDSSH
+                    '''
+                }
             }
         }
 
         stage('Health Check') {
+            when {
+                branch 'master'
+            }
             steps {
-                echo 'Performing health checks...'
-                sh '''
-                    # Check web service
-                    for i in {1..5}; do
-                        if curl -f http://localhost:8080; then
-                            echo "Health check passed"
-                            exit 0
-                        fi
-                        echo "Attempt $i failed, retrying..."
-                        sleep 5
-                    done
-                    echo "Health check failed"
-                    exit 1
-                '''
+                echo 'Performing health checks on deployment server...'
+                sshagent(credentials: ["${DEPLOY_SSH_CREDENTIALS_ID}"]) {
+                    sh '''
+                        ssh -o StrictHostKeyChecking=no ${DEPLOY_SERVER} << 'ENDSSH'
+                            cd ${DEPLOY_PATH}
+
+                            # Get deployment port
+                            DEPLOY_PORT=\$(grep WEB_PORT .env | cut -d '=' -f2)
+                            DEPLOY_PORT=\${DEPLOY_PORT:-8282}
+
+                            # Check web service
+                            for i in {1..5}; do
+                                if curl -f http://localhost:\${DEPLOY_PORT}; then
+                                    echo "Health check passed"
+                                    exit 0
+                                fi
+                                echo "Attempt \$i failed, retrying..."
+                                sleep 5
+                            done
+                            echo "Health check failed"
+                            exit 1
+ENDSSH
+                    '''
+                }
             }
         }
 
         stage('Smoke Tests') {
+            when {
+                branch 'master'
+            }
             steps {
-                echo 'Running smoke tests...'
-                sh '''
-                    # Test main page
-                    curl -f http://localhost:8080/ || { echo "Main page test failed"; exit 1; }
+                echo 'Running smoke tests on deployment server...'
+                sshagent(credentials: ["${DEPLOY_SSH_CREDENTIALS_ID}"]) {
+                    sh '''
+                        ssh -o StrictHostKeyChecking=no ${DEPLOY_SERVER} << 'ENDSSH'
+                            cd ${DEPLOY_PATH}
 
-                    # Test API endpoints
-                    curl -f http://localhost:8080/api/get_orders.php || { echo "API test failed"; exit 1; }
+                            # Get deployment port
+                            DEPLOY_PORT=\$(grep WEB_PORT .env | cut -d '=' -f2)
+                            DEPLOY_PORT=\${DEPLOY_PORT:-8282}
 
-                    echo "Smoke tests passed"
-                '''
+                            # Test main page
+                            curl -f http://localhost:\${DEPLOY_PORT}/ || { echo "Main page test failed"; exit 1; }
+
+                            # Test API endpoints
+                            curl -f http://localhost:\${DEPLOY_PORT}/api/get_orders.php || { echo "API test failed"; exit 1; }
+
+                            echo "Smoke tests passed"
+ENDSSH
+                    '''
+                }
             }
         }
     }
@@ -272,6 +395,9 @@ pipeline {
         always {
             echo 'Cleaning up...'
             sh '''
+                # Clean up Docker image tar files
+                rm -f ${DOCKER_IMAGE}-*.tar.gz || true
+
                 # Clean up dangling images
                 docker image prune -f || true
             '''
