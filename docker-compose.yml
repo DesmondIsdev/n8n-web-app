@@ -1,0 +1,68 @@
+version: '3.8'
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: n8n-web-app
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    environment:
+      - DB_HOST=${DB_HOST:-db}
+      - DB_NAME=${DB_NAME:-n8n_orders}
+      - DB_USER=${DB_USER:-n8n_user}
+      - DB_PASS=${DB_PASS:-n8n_password}
+    volumes:
+      - ./htdocs:/var/www/html
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - n8n-network
+    restart: unless-stopped
+
+  db:
+    image: mysql:8.0
+    container_name: n8n-mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-rootpassword}
+      - MYSQL_DATABASE=${DB_NAME:-n8n_orders}
+      - MYSQL_USER=${DB_USER:-n8n_user}
+      - MYSQL_PASSWORD=${DB_PASS:-n8n_password}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./if0_40626529_n8n.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "${DB_PORT:-3306}:3306"
+    networks:
+      - n8n-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-rootpassword}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: n8n-phpmyadmin
+    environment:
+      - PMA_HOST=db
+      - PMA_PORT=3306
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-rootpassword}
+    ports:
+      - "${PMA_PORT:-8081}:80"
+    depends_on:
+      - db
+    networks:
+      - n8n-network
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+    driver: local
+
+networks:
+  n8n-network:
+    driver: bridge

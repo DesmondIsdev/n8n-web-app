@@ -1,0 +1,63 @@
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS files
+Thumbs.db
+.DS_Store
+
+# Docker volumes
+mysql_data/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Backup files
+*.bak
+*.backup
+*~
+
+# Sensitive data
+credentials.json
+secrets/
+*.pem
+*.key
+
+# Database dumps (keep only the initial schema)
+# if0_40626529_n8n.sql should be tracked, but exclude others
+backup*.sql
+dump*.sql
+
+# Jenkins workspace
+.jenkins/
+workspace/
+
+# Build artifacts
+dist/
+build/
+
+# Dependency directories
+node_modules/
+vendor/
+
+# PHP specific
+composer.phar
+composer.lock
