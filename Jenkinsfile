@@ -129,7 +129,7 @@ pipeline {
 
         stage('Security Scan') {
             when {
-                branch 'master'
+                branch "master"
             }
             steps {
                 echo 'Running security scan...'
@@ -153,7 +153,7 @@ pipeline {
 
         stage('Save Docker Image') {
             when {
-                branch 'master'
+                branch "master"
             }
             steps {
                 echo 'Saving Docker image to tar file...'
@@ -173,7 +173,7 @@ pipeline {
 
         stage('Transfer to Deployment Server') {
             when {
-                branch 'master'
+                branch "master"
             }
             steps {
                 echo 'Transferring files to deployment server...'
@@ -200,7 +200,7 @@ pipeline {
 
         stage('Load Docker Image on Server') {
             when {
-                branch 'master'
+                branch "master"
             }
             steps {
                 echo 'Loading Docker image on deployment server...'
@@ -230,7 +230,7 @@ ENDSSH
         stage('Deploy to Staging') {
             when {
                 not {
-                    branch 'master'
+                    branch "master"
                 }
             }
             steps {
@@ -251,7 +251,7 @@ ENDSSH
 
         stage('Deploy to Production') {
             when {
-                branch 'master'
+                branch "master"
             }
             steps {
                 echo 'Deploying to production environment...'
@@ -309,7 +309,7 @@ ENDSSH
 
         stage('Database Migration') {
             when {
-                branch 'master'
+                branch "master"
             }
             steps {
                 echo 'Running database migrations on deployment server...'
@@ -333,7 +333,7 @@ ENDSSH
 
         stage('Health Check') {
             when {
-                branch 'master'
+                branch "master"
             }
             steps {
                 echo 'Performing health checks on deployment server...'
@@ -365,7 +365,7 @@ ENDSSH
 
         stage('Smoke Tests') {
             when {
-                branch 'master'
+                branch "master"
             }
             steps {
                 echo 'Running smoke tests on deployment server...'
