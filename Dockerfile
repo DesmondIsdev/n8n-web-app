@@ -13,8 +13,8 @@ WORKDIR /var/www/html
 # Copy application files
 COPY htdocs/ /var/www/html/
 
-# Copy Apache configuration if needed
-COPY .htaccess /var/www/html/.htaccess 2>/dev/null || true
+# Copy Apache configuration
+COPY .htaccess /var/www/html/.htaccess
 
 # Set proper permissions
 RUN chown -R www-data:www-data /var/www/html \
