@@ -79,7 +79,7 @@ pipeline {
             steps {
                 echo 'Running tests...'
                 sh '''
-                    docker compose down
+                    docker-compose down
                     # Start test containers with specific project name
                     docker-compose -p n8n-web-app -f docker-compose.yml up -d db
 
