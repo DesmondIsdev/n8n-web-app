@@ -79,16 +79,26 @@ pipeline {
             steps {
                 echo 'Running tests...'
                 sh '''
-                    # Start test containers
-                    docker-compose -f docker-compose.yml up -d db
+                    # Start test containers with specific project name
+                    docker-compose -p n8n-web-app -f docker-compose.yml up -d db
 
                     # Wait for database to be ready
                     echo "Waiting for database to be ready..."
                     sleep 20
 
-                    # Run container with test configuration
+                    # Get the actual network name created by docker-compose
+                    NETWORK_NAME=$(docker network ls --filter name=n8n-web-app --format "{{.Name}}" | grep n8n-network)
+
+                    if [ -z "$NETWORK_NAME" ]; then
+                        echo "Network not found, using default"
+                        NETWORK_NAME="n8n-web-app_n8n-network"
+                    fi
+
+                    echo "Using network: $NETWORK_NAME"
+
+                    # Test PHP version
                     docker run --rm \
-                        --network n8n-web-app_n8n-network \
+                        --network $NETWORK_NAME \
                         -e DB_HOST=db \
                         -e DB_NAME=n8n_orders \
                         -e DB_USER=n8n_user \
@@ -96,12 +106,22 @@ pipeline {
                         ${DOCKER_IMAGE}:${DOCKER_TAG} \
                         php -v
 
+                    # Test database connection
+                    docker run --rm \
+                        --network $NETWORK_NAME \
+                        -e DB_HOST=db \
+                        -e DB_NAME=n8n_orders \
+                        -e DB_USER=n8n_user \
+                        -e DB_PASS=n8n_password \
+                        ${DOCKER_IMAGE}:${DOCKER_TAG} \
+                        php -r "new PDO('mysql:host=db;dbname=n8n_orders', 'n8n_user', 'n8n_password'); echo 'Database connection successful';"
+
                     echo "Basic tests passed"
                 '''
             }
             post {
                 always {
-                    sh 'docker-compose -f docker-compose.yml down || true'
+                    sh 'docker-compose -p n8n-web-app -f docker-compose.yml down || true'
                 }
             }
         }
