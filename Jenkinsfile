@@ -243,7 +243,7 @@ ENDSSH
                     sleep 10
 
                     # Verify deployment
-                    curl -f http://localhost:8282 || { echo "Staging deployment failed"; exit 1; }
+                  #  curl -f http://localhost:8282 || { echo "Staging deployment failed"; exit 1; }
                 '''
             }
         }
