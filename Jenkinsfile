@@ -67,10 +67,27 @@ pipeline {
                     [ -f docker-compose.yml ] || { echo "docker-compose.yml not found"; exit 1; }
                     [ -d htdocs ] || { echo "htdocs directory not found"; exit 1; }
 
+                    # Check critical application files in htdocs
+                    echo "Checking critical application files..."
+                    [ -f htdocs/index.php ] || { echo "ERROR: htdocs/index.php not found"; exit 1; }
+                    [ -f htdocs/db.php ] || { echo "ERROR: htdocs/db.php not found"; exit 1; }
+                    [ -f htdocs/.htaccess ] || { echo "ERROR: htdocs/.htaccess not found"; exit 1; }
+                    [ -d htdocs/api ] || { echo "ERROR: htdocs/api directory not found"; exit 1; }
+                    [ -f htdocs/api/get_orders.php ] || { echo "ERROR: htdocs/api/get_orders.php not found"; exit 1; }
+
                     # Validate PHP syntax
                     find htdocs -name "*.php" -exec php -l {} \\; || { echo "PHP syntax errors found"; exit 1; }
 
-                    echo "Validation successful"
+                    # Check file permissions
+                    echo "Checking file permissions..."
+                    HTACCESS_PERMS=$(stat -c %a htdocs/.htaccess 2>/dev/null || stat -f %A htdocs/.htaccess)
+                    if [ "$HTACCESS_PERMS" = "644" ] || [ "$HTACCESS_PERMS" = "600" ]; then
+                        echo "✓ .htaccess permissions OK: $HTACCESS_PERMS"
+                    else
+                        echo "WARNING: .htaccess permissions: $HTACCESS_PERMS (should be 644)"
+                    fi
+
+                    echo "✓ Validation successful"
                 '''
             }
         }
@@ -82,6 +99,60 @@ pipeline {
                     docker.build("${DOCKER_IMAGE}:${DOCKER_TAG}")
                     docker.build("${DOCKER_IMAGE}:latest")
                 }
+            }
+        }
+
+        stage('Verify Build') {
+            steps {
+                echo 'Verifying Docker image contains all files...'
+                sh '''
+                    echo "Checking if files were copied to image..."
+
+                    # Run container and check if index.php exists
+                    docker run --rm ${DOCKER_IMAGE}:${DOCKER_TAG} test -f /var/www/html/index.php || {
+                        echo "❌ CRITICAL ERROR: index.php not found in Docker image!"
+                        echo "Files were not copied correctly during build."
+                        exit 1
+                    }
+                    echo "✓ index.php found in image"
+
+                    # Check other critical files
+                    docker run --rm ${DOCKER_IMAGE}:${DOCKER_TAG} test -f /var/www/html/db.php || {
+                        echo "❌ ERROR: db.php not found in image"
+                        exit 1
+                    }
+                    echo "✓ db.php found in image"
+
+                    docker run --rm ${DOCKER_IMAGE}:${DOCKER_TAG} test -f /var/www/html/.htaccess || {
+                        echo "❌ ERROR: .htaccess not found in image"
+                        exit 1
+                    }
+                    echo "✓ .htaccess found in image"
+
+                    docker run --rm ${DOCKER_IMAGE}:${DOCKER_TAG} test -d /var/www/html/api || {
+                        echo "❌ ERROR: api directory not found in image"
+                        exit 1
+                    }
+                    echo "✓ api directory found in image"
+
+                    # List all files for verification
+                    echo ""
+                    echo "=== Files in Docker image ==="
+                    docker run --rm ${DOCKER_IMAGE}:${DOCKER_TAG} ls -la /var/www/html/
+                    echo "=== End of file listing ==="
+
+                    # Verify Apache configuration
+                    echo ""
+                    echo "Verifying Apache configuration..."
+                    docker run --rm ${DOCKER_IMAGE}:${DOCKER_TAG} apache2ctl configtest || {
+                        echo "❌ ERROR: Apache configuration test failed"
+                        exit 1
+                    }
+                    echo "✓ Apache configuration valid"
+
+                    echo ""
+                    echo "✓ Build verification passed!"
+                '''
             }
         }
 
@@ -270,6 +341,14 @@ ENDSSH
                         ssh -o StrictHostKeyChecking=no ${DEPLOY_SERVER} << 'ENDSSH'
                             cd ${DEPLOY_PATH}
 
+                            echo "=== Pre-deployment verification ==="
+
+                            # Verify htdocs directory and files were transferred
+                            echo "Checking transferred files..."
+                            [ -d htdocs ] || { echo "ERROR: htdocs directory not found"; exit 1; }
+                            [ -f htdocs/index.php ] || { echo "ERROR: htdocs/index.php not found"; exit 1; }
+                            echo "✓ Application files present"
+
                             # Create .env if it doesn't exist
                             if [ ! -f .env ]; then
                                 echo "Creating .env from .env.example"
@@ -286,29 +365,68 @@ ENDSSH
                             mkdir -p backup
                             docker-compose ps -q | xargs -r docker inspect > backup/containers.json || true
 
-                            # Stop old containers
+                            # Remove old images to force using new ones
+                            echo "Removing old images..."
                             docker-compose down || true
+                            docker rmi n8n-web-app:latest 2>/dev/null || true
 
                             # Deploy new version
+                            echo "Starting containers..."
                             docker-compose up -d
 
                             # Wait for services to be healthy
-                            sleep 15
+                            echo "Waiting for services to start..."
+                            sleep 20
+
+                            # Verify files in running container
+                            echo ""
+                            echo "=== Verifying files in container ==="
+                            docker-compose exec web ls -la /var/www/html/
+
+                            # Check if index.php exists in container
+                            docker-compose exec web test -f /var/www/html/index.php || {
+                                echo "❌ CRITICAL: index.php not found in container!"
+                                echo "Deployment failed - rolling back..."
+                                docker-compose down
+                                exit 1
+                            }
+                            echo "✓ index.php found in container"
 
                             # Verify deployment
                             DEPLOY_PORT=\$(grep WEB_PORT .env | cut -d '=' -f2)
                             DEPLOY_PORT=\${DEPLOY_PORT:-8282}
 
-                            curl -f http://localhost:\${DEPLOY_PORT} || {
-                                echo "Production deployment failed, rolling back..."
+                            echo ""
+                            echo "Testing application on port \${DEPLOY_PORT}..."
+
+                            # Try multiple times with delay
+                            SUCCESS=0
+                            for i in {1..5}; do
+                                if curl -f http://localhost:\${DEPLOY_PORT} > /dev/null 2>&1; then
+                                    SUCCESS=1
+                                    break
+                                fi
+                                echo "Attempt \$i failed, retrying..."
+                                sleep 3
+                            done
+
+                            if [ \$SUCCESS -eq 0 ]; then
+                                echo "❌ Production deployment failed - application not accessible"
+                                echo "Checking container logs:"
+                                docker-compose logs --tail=50 web
+                                echo ""
+                                echo "Rolling back..."
                                 docker-compose down
                                 exit 1
-                            }
+                            fi
+
+                            echo "✓ Application accessible"
 
                             # Cleanup old images
                             docker image prune -f
 
-                            echo "Deployment successful!"
+                            echo ""
+                            echo "✅ Deployment successful!"
 ENDSSH
                     '''
                 }
