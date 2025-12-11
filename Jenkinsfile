@@ -15,9 +15,6 @@ pipeline {
         DEPLOY_PATH = 'n8n-web-app' // Path on deployment server
         DEPLOY_SSH_CREDENTIALS_ID = credentials('ssh-credentials-comulead-test-id') // Jenkins SSH credential ID
 
-        // Deployment configuration
-        DEPLOY_ENV = "${env.BRANCH_NAME == 'master' ? 'production' : 'staging'}"
-
         // Notification
         SLACK_CHANNEL = '#deployments' // Optional: configure if using Slack
     }
@@ -32,6 +29,19 @@ pipeline {
                         script: "git rev-parse --short HEAD",
                         returnStdout: true
                     ).trim()
+
+                    // Detect branch name
+                    env.GIT_BRANCH = sh(
+                        script: "git rev-parse --abbrev-ref HEAD",
+                        returnStdout: true
+                    ).trim()
+
+                    // Check if we're on master
+                    env.IS_MASTER = (env.GIT_BRANCH == 'master' || env.BRANCH_NAME == 'master') ? 'true' : 'false'
+
+                    echo "Git Branch: ${env.GIT_BRANCH}"
+                    echo "Branch Name: ${env.BRANCH_NAME}"
+                    echo "Is Master: ${env.IS_MASTER}"
                 }
             }
         }
@@ -129,7 +139,7 @@ pipeline {
 
         stage('Security Scan') {
             when {
-                branch 'master'
+                expression { env.IS_MASTER == 'true' }
             }
             steps {
                 echo 'Running security scan...'
@@ -153,7 +163,7 @@ pipeline {
 
         stage('Save Docker Image') {
             when {
-                branch 'master'
+                expression { env.IS_MASTER == 'true' }
             }
             steps {
                 echo 'Saving Docker image to tar file...'
@@ -173,7 +183,7 @@ pipeline {
 
         stage('Transfer to Deployment Server') {
             when {
-                branch 'master'
+                expression { env.IS_MASTER == 'true' }
             }
             steps {
                 echo 'Transferring files to deployment server...'
@@ -200,7 +210,7 @@ pipeline {
 
         stage('Load Docker Image on Server') {
             when {
-                branch 'master'
+                expression { env.IS_MASTER == 'true' }
             }
             steps {
                 echo 'Loading Docker image on deployment server...'
@@ -229,9 +239,7 @@ ENDSSH
 
         stage('Deploy to Staging') {
             when {
-                not {
-                    branch 'master'
-                }
+                expression { env.IS_MASTER == 'false' }
             }
             steps {
                 echo 'Deploying to staging environment...'
@@ -251,7 +259,7 @@ ENDSSH
 
         stage('Deploy to Production') {
             when {
-                branch 'master'
+                expression { env.IS_MASTER == 'true' }
             }
             steps {
                 echo 'Deploying to production environment...'
@@ -309,7 +317,7 @@ ENDSSH
 
         stage('Database Migration') {
             when {
-                branch 'master'
+                expression { env.IS_MASTER == 'true' }
             }
             steps {
                 echo 'Running database migrations on deployment server...'
@@ -333,7 +341,7 @@ ENDSSH
 
         stage('Health Check') {
             when {
-                branch 'master'
+                expression { env.IS_MASTER == 'true' }
             }
             steps {
                 echo 'Performing health checks on deployment server...'
@@ -365,7 +373,7 @@ ENDSSH
 
         stage('Smoke Tests') {
             when {
-                branch 'master'
+                expression { env.IS_MASTER == 'true' }
             }
             steps {
                 echo 'Running smoke tests on deployment server...'
